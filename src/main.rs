@@ -69,8 +69,8 @@ impl Reader
         let filesize = path.metadata()?.len();
 
         if filesize > self.max_size {
-            return Err(format!(r#""{} is bigger than the maximum allowed buffer size {}"#,
-                               path.to_string_lossy(),self.max_size).into());
+            return Err(format!(r#""{} is bigger than the maximum allowed buffer size {}G"#,
+                               path.to_string_lossy(),self.max_size/ GIGABYTE).into());
         }
 
         // wait for files to finish until we're within our size allowance
@@ -115,11 +115,13 @@ impl Reader
     }
 }
 
+static GIGABYTE:u64 = 1<<30;
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(),Box<dyn Error>>
 {
     let args = Cli::parse();
-    let mut reader = Reader::new(args.max_size^30,args.release);
+    let mut reader = Reader::new(args.max_size* GIGABYTE, args.release);
 
     for md5filepath in args.file
     {
