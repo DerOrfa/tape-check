@@ -1,14 +1,14 @@
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use md5;
 use std::path::{Path, PathBuf};
-use tokio::{fs::File, task::JoinSet};
+use tokio::{task::JoinSet};
 use std::error::Error;
 use std::pin::Pin;
 use std::process::Command;
-use std::task::Poll;
+use std::task::{Context, Poll};
 use clap::{Parser, ValueHint::FilePath};
 use log::debug;
-use tokio::io::AsyncWrite;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -34,6 +34,45 @@ impl MD5Buffer
     fn compute(self) -> md5::Digest{self.0.compute()}
 }
 
+struct File(tokio::fs::File);
+
+impl File
+{
+	async fn open<T>(path:T) -> std::io::Result<File> where T:AsRef<Path>
+	{
+		let mut res = Err(std::io::Error::from(ErrorKind::TimedOut));
+		while let Err(err)= &res
+		{
+			match err.kind() {
+				ErrorKind::TimedOut | ErrorKind::Interrupted => {
+					debug!("(re)trying to open '{}'",path.as_ref().to_string_lossy());
+					res=tokio::fs::File::open(path.as_ref()).await;
+				}
+				_ => {
+					let desc=std::io::Error::other(format!("Failed to open {}",path.as_ref().to_string_lossy()));
+					return Err(std::io::Error::new(err.kind(),desc))
+				}
+			}
+		};
+		res.map(|tfile|File{0:tfile})
+	}
+}
+impl AsyncRead for File
+{
+    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>>
+    {
+        match Pin::new(&mut self.get_mut().0).poll_read(cx,buf)
+        {
+            Poll::Ready(Ok(_)) => Poll::Ready(Ok(())),
+            Poll::Ready(Err(e)) => {
+                if let Some(16) = e.raw_os_error(){Poll::Pending}
+				else { Poll::Ready(Err(e)) }
+            },
+            Poll::Pending => Poll::Pending
+        }
+    }
+}
+
 impl AsyncWrite for MD5Buffer
 {
     fn poll_write(self: Pin<&mut Self>, _cx: &mut std::task::Context<'_>, buf: &[u8]) -> Poll<Result<usize, std::io::Error>> {
@@ -52,21 +91,7 @@ impl AsyncWrite for MD5Buffer
 async fn check_file(path:PathBuf, reference:String) -> std::io::Result<bool>
 {
     // try open file until we get it, or it's a non-repeat-Error
-    let mut res = Err(std::io::Error::from(ErrorKind::TimedOut));
-    while let Err(err)= &res
-    {
-        match err.kind() {
-            ErrorKind::TimedOut | ErrorKind::Interrupted => {
-                debug!("(re)trying to open '{}'",path.to_string_lossy());
-                res=File::open(&path).await;
-            }
-            _ => {
-                let desc=std::io::Error::other(format!("Failed to open {}",path.to_string_lossy()));
-                return Err(std::io::Error::new(err.kind(),desc))
-            }
-        }
-    };
-    let mut file = res.expect("file should be valid here");
+    let mut file = File::open(&path).await?;
     let mut context = MD5Buffer::new();
     debug!("reading '{}'",path.to_string_lossy());
     tokio::io::copy(&mut file,&mut context).await?;
@@ -122,12 +147,12 @@ impl Reader
         {
             None => Ok(None),
             Some((path,Ok(ok))) =>
-            {
-                self.cur_size -= path.metadata()?.len();
-                println!("{} {}",path.to_string_lossy(),if ok {"OK"} else {"FAIL"});
-                self.release(&path);
-                Ok(Some((path,ok)))
-            }
+                {
+                    self.cur_size -= path.metadata()?.len();
+                    println!("{} {}",path.to_string_lossy(),if ok {"OK"} else {"FAIL"});
+                    self.release(&path);
+                    Ok(Some((path,ok)))
+                }
             Some((path,Err(e))) => {
                 self.release(&path);
                 Err(format!(r#"failed reading {}: {e}"#,path.to_string_lossy()).into())
