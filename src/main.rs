@@ -1,11 +1,14 @@
 use std::io::{BufRead, BufReader, ErrorKind, Write};
-use md5::Context;
+use md5;
 use std::path::{Path, PathBuf};
-use tokio::{fs::File, io::AsyncReadExt, task::JoinSet};
+use tokio::{fs::File, task::JoinSet};
 use std::error::Error;
+use std::pin::Pin;
 use std::process::Command;
+use std::task::Poll;
 use clap::{Parser, ValueHint::FilePath};
 use log::debug;
+use tokio::io::AsyncWrite;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -21,6 +24,29 @@ struct Cli {
     release:Option<String>,
     #[command(flatten)]
     verbose: clap_verbosity_flag::Verbosity,
+}
+
+struct MD5Buffer(md5::Context);
+
+impl MD5Buffer
+{
+    fn new() -> MD5Buffer { MD5Buffer { 0: md5::Context::new() }}
+    fn compute(self) -> md5::Digest{self.0.compute()}
+}
+
+impl AsyncWrite for MD5Buffer
+{
+    fn poll_write(self: Pin<&mut Self>, _cx: &mut std::task::Context<'_>, buf: &[u8]) -> Poll<Result<usize, std::io::Error>> {
+        Poll::from(self.get_mut().0.write(buf))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        Poll::from(self.get_mut().0.flush())
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        Poll::Ready(Ok(()))
+    }
 }
 
 async fn check_file(path:PathBuf, reference:String) -> std::io::Result<bool>
@@ -41,15 +67,11 @@ async fn check_file(path:PathBuf, reference:String) -> std::io::Result<bool>
         }
     };
     let mut file = res.expect("file should be valid here");
-    let mut buffer=[0; 1024*8];
-    let mut context = Context::new();
+    let mut context = MD5Buffer::new();
     debug!("reading '{}'",path.to_string_lossy());
-    while let Ok(size) = file.read(&mut buffer).await
-    {
-        context.write_all(&buffer[..size])?;
-    }
+    tokio::io::copy(&mut file,&mut context).await?;
     let computed = context.compute();
-    debug!("'{}' is done computed:'{:x}', reference:'{}'", path.to_string_lossy(),computed,reference);
+    debug!("'{}' is done computed:'{computed:x}', reference:'{reference}'", path.to_string_lossy());
     Ok(format!("{:x}", computed)==reference)
 }
 #[derive(Default)]
