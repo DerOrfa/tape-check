@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use tokio::task::JoinSet;
 use std::error::Error;
 use std::pin::Pin;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::task::{Context, Poll};
 use std::thread;
 use std::time::Duration;
@@ -40,24 +40,24 @@ struct File(tokio::fs::File);
 
 impl File
 {
-	async fn open<T>(path:T) -> std::io::Result<File> where T:AsRef<Path>
-	{
-		let mut res = Err(std::io::Error::from(ErrorKind::TimedOut));
-		while let Err(err)= &res
-		{
-			match err.kind() {
-				ErrorKind::TimedOut | ErrorKind::Interrupted => {
-					debug!("(re)trying to open '{}'",path.as_ref().to_string_lossy());
-					res=tokio::fs::File::open(path.as_ref()).await;
-				}
-				_ => {
-					let desc=std::io::Error::other(format!("Failed to open {}",path.as_ref().to_string_lossy()));
-					return Err(std::io::Error::new(err.kind(),desc))
-				}
-			}
-		};
-		res.map(|tfile|File{0:tfile})
-	}
+    async fn open<T>(path:T) -> std::io::Result<File> where T:AsRef<Path>
+    {
+        let mut res = Err(std::io::Error::from(ErrorKind::TimedOut));
+        while let Err(err)= &res
+        {
+            match err.kind() {
+                ErrorKind::TimedOut | ErrorKind::Interrupted => {
+                    debug!("(re)trying to open '{}'",path.as_ref().to_string_lossy());
+                    res=tokio::fs::File::open(path.as_ref()).await;
+                }
+                _ => {
+                    let desc=std::io::Error::other(format!("Failed to open {}",path.as_ref().to_string_lossy()));
+                    return Err(std::io::Error::new(err.kind(),desc))
+                }
+            }
+        };
+        res.map(|tfile|File{0:tfile})
+    }
 }
 impl AsyncRead for File
 {
@@ -160,16 +160,16 @@ impl Reader
                 {
                     self.cur_size -= path.metadata()?.len();
                     println!("{} {}",path.to_string_lossy(),if ok {"OK"} else {"FAIL"});
-                    self.release(&path);
+                    self.release(&path)?;
                     Ok(Some((path,ok)))
                 }
             Some((path,Err(e))) => {
-                self.release(&path);
+                self.release(&path)?;
                 Err(format!(r#"failed reading {}: {e}"#,path.to_string_lossy()).into())
             }
         }
     }
-    fn release<T>(&self,path:T) where T:AsRef<Path>
+    fn release<T>(&self,path:T) -> Result<(),Box<dyn Error>> where T:AsRef<Path>
     {
         if let Some((program,params))=self.release.split_first()
         {
@@ -179,9 +179,17 @@ impl Reader
                 self.release.join(" "),
                 path.to_string_lossy()
             );
-            Command::new(program).args(params).arg(path.as_os_str()).status().ok();
+            Command::new(program)
+                .args(params).arg(path.as_os_str())
+                .stdout(Stdio::null()).status()
+                .map_err(|e| -> Box<dyn Error> {
+                    format!(r#"failed running {} {}: {e}"#,
+                        self.release.join(" "), path.to_string_lossy()).into()
+                    }
+                )?;
         }
-    }
+        Ok(())
+	}
     async fn join(&mut self) -> Result<(),Box<dyn Error>>
     {
         while let Some(_) = self.next().await? {}
