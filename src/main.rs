@@ -1,11 +1,13 @@
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use md5;
 use std::path::{Path, PathBuf};
-use tokio::{task::JoinSet};
+use tokio::task::JoinSet;
 use std::error::Error;
 use std::pin::Pin;
 use std::process::Command;
 use std::task::{Context, Poll};
+use std::thread;
+use std::time::Duration;
 use clap::{Parser, ValueHint::FilePath};
 use log::debug;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -65,8 +67,16 @@ impl AsyncRead for File
         {
             Poll::Ready(Ok(_)) => Poll::Ready(Ok(())),
             Poll::Ready(Err(e)) => {
-                if let Some(16) = e.raw_os_error(){Poll::Pending}
-				else { Poll::Ready(Err(e)) }
+                if let Some(16) = e.raw_os_error(){
+                    debug!("Got EBUSY from OS, going to wait for a while...");
+                    let waker = cx.waker().clone();
+                    thread::spawn(move || {
+                        thread::sleep(SLEEP_DURATION);
+                        waker.wake();
+                    });
+                    Poll::Pending
+                }
+                else {Poll::Ready(Err(e)) }
             },
             Poll::Pending => Poll::Pending
         }
@@ -180,6 +190,7 @@ impl Reader
 }
 
 static GIGABYTE:u64 = 1<<30;
+static SLEEP_DURATION:Duration = Duration::new(10,0);
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(),Box<dyn Error>>
