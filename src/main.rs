@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader, ErrorKind, Write};
+use std::io::{ErrorKind, Write};
 use md5;
 use std::path::{Path, PathBuf};
 use tokio::task::JoinSet;
@@ -10,7 +10,7 @@ use std::thread;
 use std::time::Duration;
 use clap::{Parser, ValueHint::FilePath};
 use log::debug;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead,AsyncBufReadExt, AsyncWrite, ReadBuf};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -212,11 +212,12 @@ async fn main() -> Result<(),Box<dyn Error>>
 
     for md5filepath in args.file
     {
-        let md5file = std::fs::File::open(md5filepath.as_path())
+        let md5file = File::open(&md5filepath).await
             .map_err(|e|format!("failed to open '{}': {e}",md5filepath.to_string_lossy()))?;
         let  md5base = md5filepath.parent().unwrap();//Should never be None, as File::open would have failed
 
-        for line in BufReader::new(md5file).lines()
+        let mut lines= tokio::io::BufReader::new(md5file).lines();
+        while let Some(line) = lines.next_line().await.transpose()
         {
             match line {
                 Ok(line) => {
